@@ -10,6 +10,12 @@ from typing import Any
 
 import requests
 
+from us_stock_signal.execution_policy import (
+    recommendation_primary_take_profit_price,
+    recommendation_primary_take_profit_target,
+    recommendation_secondary_take_profit_price,
+    take_profit_label,
+)
 from us_stock_signal.models import MarkdownMessage, Recommendation
 
 
@@ -43,6 +49,12 @@ def format_markdown_message(
     is_watchlist = top.signal_status in {"WATCHLIST", "CONFIRMING"}
     top_heading = "Top1 预备观察" if is_watchlist else "Top1 重点信号"
     price_label = _price_label(top.data_quality)
+    primary_target = _primary_take_profit_target(top, scan_summary)
+    primary_label = take_profit_label(primary_target)
+    primary_take_profit = recommendation_primary_take_profit_price(top, primary_target)
+    secondary_label = "TP1" if primary_label == "TP2" else "TP2"
+    secondary_take_profit = recommendation_secondary_take_profit_price(top, primary_target)
+
     lines = [
         f"### {title}",
         "",
@@ -54,25 +66,33 @@ def format_markdown_message(
         f"- 信号状态：{top.signal_status}",
         f"- 综合分：{top.score:.1f}/100",
         f"- {price_label}：{top.current_price:.2f}",
-        f"- 入场区间：{top.entry_price_low:.2f} - {top.entry_price_high:.2f}",
-        f"- 止损价：{top.stop_loss:.2f}",
-        f"- 止盈价：{top.take_profit_1:.2f} / {top.take_profit_2:.2f}",
+        f"- 观察区间：{top.entry_price_low:.2f} - {top.entry_price_high:.2f}",
+        f"- 回测触发价：突破 {top.entry_price_high:.2f}",
+        f"- 允许追价上限：{_max_chase_price(top):.2f}",
+        f"- 回测止损价：{top.stop_loss:.2f}",
+        f"- 回测主止盈：{primary_label} {primary_take_profit:.2f}",
+        f"- 参考止盈：{secondary_label} {secondary_take_profit:.2f}",
         f"- 信号有效期：{top.expiry}",
         f"- 失效价格：{top.invalidation_price:.2f}",
-        f"- 推荐原因：{'；'.join(top.reasons) or '无'}",
-        f"- 风险提示：{'；'.join(top.risk_flags) or '无'}",
+        f"- 推荐原因：{'; '.join(top.reasons) or '无'}",
+        f"- 风险提示：{'; '.join(top.risk_flags) or '无'}",
         f"- 数据质量：{top.data_quality}",
         _price_source_line(top.data_quality),
         _ai_status_line(top.ai_status),
+        f"- 执行口径：按回测主目标 {primary_label} 跟踪，不按参考止盈分批落袋",
         "",
         *_summary_lines(len(recommendations), scan_summary),
         "",
         "**候选简表**",
     ]
     for rec in recommendations[:10]:
+        rec_target = _primary_take_profit_target(rec, scan_summary)
+        rec_primary_label = take_profit_label(rec_target)
+        rec_primary_take_profit = recommendation_primary_take_profit_price(rec, rec_target)
         lines.append(
-            f"{rec.rank}. {rec.symbol} | 分数 {rec.score:.1f} | 入场 {rec.entry_price_low:.2f}-{rec.entry_price_high:.2f} | "
-            f"止损 {rec.stop_loss:.2f} | 止盈 {rec.take_profit_1:.2f}/{rec.take_profit_2:.2f}"
+            f"{rec.rank}. {rec.symbol} | 分数 {rec.score:.1f} | 触发 >= {rec.entry_price_high:.2f} | "
+            f"追价 <= {_max_chase_price(rec):.2f} | 止损 {rec.stop_loss:.2f} | "
+            f"主止盈 {rec_primary_label} {rec_primary_take_profit:.2f}"
         )
     lines.extend(["", "> 仅为研究提醒，不自动交易，不构成投资建议。"])
     return MarkdownMessage(title=title, text="\n".join(lines))
@@ -90,14 +110,16 @@ def _summary_lines(candidate_count: int, scan_summary: dict[str, Any] | None) ->
         top_n = scan_summary.get("top_n")
         trigger_mode = scan_summary.get("trigger_mode")
         primary_take_profit = scan_summary.get("primary_take_profit")
+
     lines = [f"本次入选候选：{candidate_count} 个"]
     if trigger_mode == "high_yield_breakout":
-        target_text = "TP2" if primary_take_profit == "tp2" else "TP1"
+        target_text = take_profit_label(primary_take_profit)
         lines.append(f"触发模式：高收益突破；验证主目标：{target_text}")
     if scanned_count is not None:
         lines.append(f"本次扫描范围：{scanned_count} 个")
     if min_score is not None:
-        score_text = f"{float(min_score):.0f}" if float(min_score).is_integer() else f"{float(min_score):.1f}"
+        score_value = float(min_score)
+        score_text = f"{score_value:.0f}" if score_value.is_integer() else f"{score_value:.1f}"
         limit_text = f"，最多推送 Top{top_n}" if top_n is not None else ""
         lines.append(f"入选门槛：综合分 >= {score_text}，且通过价格/流动性/止损止盈硬过滤{limit_text}")
     return lines
@@ -151,6 +173,22 @@ def _price_source_line(data_quality: str) -> str:
     if data_quality == "duckdb_daily":
         return "- 价格来源：日线数据库，不是盘中实时价"
     return "- 价格来源：实时/近实时行情"
+
+
+def _primary_take_profit_target(
+    recommendation: Recommendation,
+    scan_summary: dict[str, Any] | None,
+) -> str:
+    fallback = None
+    if scan_summary:
+        fallback = scan_summary.get("primary_take_profit")
+    return recommendation_primary_take_profit_target(recommendation, fallback)
+
+
+def _max_chase_price(recommendation: Recommendation) -> float:
+    if recommendation.max_chase_price and recommendation.max_chase_price >= recommendation.entry_price_high:
+        return recommendation.max_chase_price
+    return recommendation.entry_price_high
 
 
 class DingTalkNotifier:

@@ -42,8 +42,14 @@ pricing:
   min_stop_pct: 0.02
   max_stop_pct: 0.02
   entry_buffer_pct: 0.0
+  max_chase_pct: 0.005
   max_tracking_trading_days: 3
   pending_signal_expiry_trading_days: 1
+
+monitor:
+  candidate_pool_size: 20
+  notify_max_events_per_run: 5
+  include_extended_hours: true
 
 backtest:
   lookback_days: 365

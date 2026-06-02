@@ -9,6 +9,7 @@ from typing import Any
 class TradePlan:
     entry_price_low: float
     entry_price_high: float
+    max_chase_price: float
     stop_loss: float
     take_profit_1: float
     take_profit_2: float
@@ -60,6 +61,8 @@ class Recommendation:
     risk_flags: list[str]
     data_quality: str
     ai_status: str
+    max_chase_price: float = 0.0
+    primary_take_profit: str = ""
     direction: str = "LONG"
     signal_status: str = "ACTIONABLE"
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

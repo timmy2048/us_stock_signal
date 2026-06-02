@@ -97,3 +97,26 @@ def test_backtest_keeps_holding_after_entry_window_when_entry_triggered():
     assert result.exit_reason == "TAKE_PROFIT_1"
     assert result.entry_bar_index == 2
     assert result.exit_bar_index == 4
+
+
+def test_backtest_skips_entry_when_price_gaps_above_allowed_chase_cap():
+    prices = pd.DataFrame(
+        {
+            "close": [10.0, 10.8, 11.0],
+            "high": [10.1, 11.0, 11.2],
+            "low": [9.9, 10.8, 10.9],
+        }
+    )
+
+    result = run_path_backtest(
+        prices,
+        entry_price_high=10.2,
+        max_entry_price=10.3,
+        stop_loss=9.5,
+        take_profit_1=11.5,
+        max_bars=2,
+        slippage_bps=0,
+        commission=0,
+    )
+
+    assert result.exit_reason == "NO_ENTRY"

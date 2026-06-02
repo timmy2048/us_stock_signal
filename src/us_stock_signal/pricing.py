@@ -28,10 +28,12 @@ def build_trade_plan(
     min_stop_pct = float(config.get("min_stop_pct", 0.03))
     max_stop_pct = float(config.get("max_stop_pct", 0.08))
     buffer_pct = float(config.get("entry_buffer_pct", 0.002))
+    max_chase_pct = max(0.0, float(config.get("max_chase_pct", 0.0)))
     expiry_days = int(config.get("pending_signal_expiry_trading_days", 2))
 
     entry_low = current_price
     entry_high = max(current_price, recent_high_15m * (1 + buffer_pct))
+    max_chase_price = max(entry_high, entry_high * (1 + max_chase_pct))
     planned_entry = entry_high
     raw_stop_distance = atr14 * stop_multiple
     min_stop_distance = planned_entry * min_stop_pct
@@ -41,6 +43,7 @@ def build_trade_plan(
     return TradePlan(
         entry_price_low=_round_price(entry_low),
         entry_price_high=_round_price(entry_high),
+        max_chase_price=_round_price(max_chase_price),
         stop_loss=_round_price(planned_entry - stop_distance),
         take_profit_1=_round_price(planned_entry + atr14 * tp1_multiple),
         take_profit_2=_round_price(planned_entry + atr14 * tp2_multiple),

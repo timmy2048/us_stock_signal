@@ -13,12 +13,14 @@ def test_trade_plan_has_explicit_entry_stop_targets_and_expiry():
             "min_stop_pct": 0.03,
             "max_stop_pct": 0.08,
             "entry_buffer_pct": 0.002,
+            "max_chase_pct": 0.005,
             "pending_signal_expiry_trading_days": 2,
         },
     )
 
     assert plan.entry_price_low == 10.0
     assert plan.entry_price_high == 10.22
+    assert plan.max_chase_price == 10.27
     assert plan.stop_loss == 9.62
     assert plan.take_profit_1 == 11.12
     assert plan.take_profit_2 == 11.72
@@ -38,6 +40,7 @@ def test_stop_loss_is_capped_to_max_stop_pct_for_very_large_atr():
             "min_stop_pct": 0.03,
             "max_stop_pct": 0.08,
             "entry_buffer_pct": 0.002,
+            "max_chase_pct": 0.005,
             "pending_signal_expiry_trading_days": 2,
         },
     )
@@ -57,6 +60,7 @@ def test_stop_loss_risk_is_capped_from_planned_entry_price():
             "min_stop_pct": 0.03,
             "max_stop_pct": 0.08,
             "entry_buffer_pct": 0.002,
+            "max_chase_pct": 0.005,
             "pending_signal_expiry_trading_days": 2,
         },
     )
@@ -64,4 +68,5 @@ def test_stop_loss_risk_is_capped_from_planned_entry_price():
     risk_pct = (plan.entry_price_high - plan.stop_loss) / plan.entry_price_high
 
     assert plan.entry_price_high == 12.02
+    assert plan.max_chase_price == 12.08
     assert round(risk_pct, 4) <= 0.0801

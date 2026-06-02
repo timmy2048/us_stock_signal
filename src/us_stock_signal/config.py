@@ -30,6 +30,7 @@ class Settings:
     universe: dict[str, Any]
     scoring: dict[str, Any]
     pricing: dict[str, Any]
+    monitor: dict[str, Any]
     backtest: dict[str, Any]
     schedule: dict[str, Any]
     dingtalk_webhook: str = ""
@@ -51,6 +52,7 @@ def load_settings(
         universe=data.get("universe", {}),
         scoring=data.get("scoring", {}),
         pricing=data.get("pricing", {}),
+        monitor=data.get("monitor", {}),
         backtest=data.get("backtest", {}),
         schedule=data.get("schedule", {}),
         dingtalk_webhook=env.get("DINGTALK_WEBHOOK", ""),

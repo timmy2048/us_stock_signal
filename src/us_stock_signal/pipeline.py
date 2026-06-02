@@ -29,19 +29,21 @@ def build_recommendations_from_snapshots(
     settings: Settings,
     session: str,
     snapshots: list[MarketSnapshot],
+    limit: int | None = None,
 ) -> list[Recommendation]:
     if not snapshots:
         return []
 
+    preliminary_limit = min(max(int(limit or 20), 20), len(snapshots))
     pre_engine = RecommendationEngine(
         {
             "universe": settings.universe,
-            "scoring": {**settings.scoring, "min_score": 0, "top_n": min(20, len(snapshots))},
+            "scoring": {**settings.scoring, "min_score": 0, "top_n": preliminary_limit},
             "pricing": settings.pricing,
         }
     )
     preliminary = pre_engine.recommend(snapshots, {}, session)
-    candidate_symbols = [rec.symbol for rec in preliminary[:20]]
+    candidate_symbols = [rec.symbol for rec in preliminary[:preliminary_limit]]
     news_by_symbol: dict[str, NewsBundle] = {}
     ai_client = DeepSeekClient(settings.deepseek_api_key, settings.deepseek_base_url, settings.deepseek_model)
     snapshot_by_symbol = {snapshot.symbol: snapshot for snapshot in snapshots}
@@ -59,7 +61,7 @@ def build_recommendations_from_snapshots(
     engine = RecommendationEngine(
         {"universe": settings.universe, "scoring": settings.scoring, "pricing": settings.pricing}
     )
-    return engine.recommend(snapshots, news_by_symbol, session)
+    return engine.recommend(snapshots, news_by_symbol, session, limit=limit)
 
 
 def run_scan(

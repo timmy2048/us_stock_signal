@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from .backtest import run_path_backtest
+from .execution_policy import config_primary_take_profit, take_profit_event_type
 from .features.technical import average_true_range, score_technical_snapshot, technical_snapshot_features
 from .models import MarketSnapshot
 from .models_ml.simple_model import heuristic_ml_score
@@ -218,6 +219,7 @@ def validate_prepared_signal_days(
                     commission_per_share,
                 ),
                 take_profit_label=_validation_take_profit_label(config),
+                max_entry_price=rec.max_chase_price or None,
             )
             signals.append(
                 ValidatedSignal(
@@ -265,17 +267,12 @@ def _entry_expiry_bars(config: dict[str, Any], max_holding_days: int) -> int:
 
 
 def _validation_take_profit(rec, config: dict[str, Any]) -> float:
-    scoring = config.get("scoring", {})
-    high_yield = scoring.get("high_yield", {})
-    target = high_yield.get("primary_take_profit", scoring.get("primary_take_profit", "tp1"))
-    return rec.take_profit_2 if target in {"tp2", "take_profit_2"} else rec.take_profit_1
+    target = config_primary_take_profit(config)
+    return rec.take_profit_2 if target == "tp2" else rec.take_profit_1
 
 
 def _validation_take_profit_label(config: dict[str, Any]) -> str:
-    scoring = config.get("scoring", {})
-    high_yield = scoring.get("high_yield", {})
-    target = high_yield.get("primary_take_profit", scoring.get("primary_take_profit", "tp1"))
-    return "TAKE_PROFIT_2" if target in {"tp2", "take_profit_2"} else "TAKE_PROFIT_1"
+    return take_profit_event_type(config_primary_take_profit(config))
 
 
 def _round_trip_commission_per_share(

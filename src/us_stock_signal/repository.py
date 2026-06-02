@@ -282,6 +282,7 @@ class MarketRepository:
             "sync_runs",
             "top1_signals",
             "top1_signal_events",
+            "tracked_signals",
         }
         if table_name not in allowed:
             raise ValueError(f"unsupported table: {table_name}")
@@ -439,6 +440,12 @@ class MarketRepository:
                     rank integer,
                     score double,
                     signal_status varchar,
+                    lifecycle_status varchar,
+                    final_event_type varchar,
+                    final_event_price double,
+                    final_event_at timestamp,
+                    entered_at timestamp,
+                    closed_at timestamp,
                     created_at timestamp,
                     recorded_at timestamp,
                     scan_summary_json varchar,
@@ -446,6 +453,18 @@ class MarketRepository:
                 )
                 """
             )
+            for statement in [
+                "alter table top1_signals add column if not exists lifecycle_status varchar",
+                "alter table top1_signals add column if not exists final_event_type varchar",
+                "alter table top1_signals add column if not exists final_event_price double",
+                "alter table top1_signals add column if not exists final_event_at timestamp",
+                "alter table top1_signals add column if not exists entered_at timestamp",
+                "alter table top1_signals add column if not exists closed_at timestamp",
+            ]:
+                try:
+                    conn.execute(statement)
+                except Exception:
+                    continue
             conn.execute(
                 """
                 create table if not exists top1_signal_events (
@@ -460,6 +479,41 @@ class MarketRepository:
                 )
                 """
             )
+            conn.execute(
+                """
+                create table if not exists tracked_signals (
+                    recommendation_id varchar primary key,
+                    symbol varchar,
+                    session varchar,
+                    rank integer,
+                    score double,
+                    signal_status varchar,
+                    lifecycle_status varchar,
+                    final_event_type varchar,
+                    final_event_price double,
+                    final_event_at timestamp,
+                    entered_at timestamp,
+                    closed_at timestamp,
+                    created_at timestamp,
+                    recorded_at timestamp,
+                    scan_summary_json varchar,
+                    payload json
+                )
+                """
+            )
+            for statement in [
+                "alter table tracked_signals add column if not exists signal_status varchar",
+                "alter table tracked_signals add column if not exists lifecycle_status varchar",
+                "alter table tracked_signals add column if not exists final_event_type varchar",
+                "alter table tracked_signals add column if not exists final_event_price double",
+                "alter table tracked_signals add column if not exists final_event_at timestamp",
+                "alter table tracked_signals add column if not exists entered_at timestamp",
+                "alter table tracked_signals add column if not exists closed_at timestamp",
+            ]:
+                try:
+                    conn.execute(statement)
+                except Exception:
+                    continue
 
 
 def _now() -> datetime:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .execution_policy import config_primary_take_profit
 from .models import MarketSnapshot, NewsBundle, Recommendation
 from .pricing import build_trade_plan
 
@@ -32,6 +33,7 @@ class RecommendationEngine:
                     "min_stop_pct": 0.03,
                     "max_stop_pct": 0.08,
                     "entry_buffer_pct": 0.002,
+                    "max_chase_pct": 0.005,
                     "pending_signal_expiry_trading_days": 2,
                 },
             }
@@ -42,6 +44,7 @@ class RecommendationEngine:
         snapshots: list[MarketSnapshot],
         news_by_symbol: dict[str, NewsBundle],
         session: str,
+        limit: int | None = None,
     ) -> list[Recommendation]:
         candidates: list[tuple[tuple[float, ...], Recommendation, MarketSnapshot]] = []
         for snapshot in snapshots:
@@ -79,6 +82,7 @@ class RecommendationEngine:
                 current_price=round(snapshot.current_price, 2),
                 entry_price_low=plan.entry_price_low,
                 entry_price_high=plan.entry_price_high,
+                max_chase_price=plan.max_chase_price,
                 stop_loss=plan.stop_loss,
                 take_profit_1=plan.take_profit_1,
                 take_profit_2=plan.take_profit_2,
@@ -88,13 +92,14 @@ class RecommendationEngine:
                 risk_flags=risk_flags[:6],
                 data_quality=snapshot.data_quality,
                 ai_status="available" if snapshot.ai_score != 50 else "neutral_or_missing",
+                primary_take_profit=config_primary_take_profit(self.config),
                 signal_status=signal_status,
             )
             candidates.append((self._sort_key(score, snapshot, plan), recommendation, snapshot))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         candidates = self._apply_trigger_mode(candidates)
-        recommendations = [rec for _, rec, _ in candidates[: self._top_n()]]
+        recommendations = [rec for _, rec, _ in candidates[: self._top_n(limit)]]
         for rank, rec in enumerate(recommendations, start=1):
             rec.rank = rank
         return recommendations
@@ -216,7 +221,9 @@ class RecommendationEngine:
             parts.append(f"price <= {float(high_yield['max_price']):g}")
         return "\u9ad8\u6536\u76ca\u89e6\u53d1(high yield): " + ", ".join(parts)
 
-    def _top_n(self) -> int:
+    def _top_n(self, limit: int | None = None) -> int:
+        if limit is not None:
+            return max(int(limit), 0)
         scoring = self.config.get("scoring", {})
         if scoring.get("trigger_mode") == "high_yield_breakout":
             return int(scoring.get("high_yield", {}).get("top_n", scoring.get("top_n", 10)))

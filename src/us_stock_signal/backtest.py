@@ -13,6 +13,7 @@ def run_path_backtest(
     commission: float,
     take_profit_label: str = "TAKE_PROFIT_1",
     entry_expiry_bars: int | None = None,
+    max_entry_price: float | None = None,
 ) -> BacktestTradeResult:
     if len(prices) < 2:
         raise ValueError("prices must contain at least two rows")
@@ -26,15 +27,18 @@ def run_path_backtest(
     entry_price = 0.0
     entry_bar_index = 0
     bars_held = 0
+    entry_ceiling = (
+        entry_price_high if max_entry_price is None else max(float(max_entry_price), float(entry_price_high))
+    )
     rows = prices.reset_index(drop=True)
     for idx in range(1, last_bar_index + 1):
         row = rows.iloc[idx]
         high = float(row["high"])
         low = float(row["low"])
         close = float(row["close"])
-        if not entered and idx <= entry_deadline_index and high >= entry_price_high:
+        if not entered and idx <= entry_deadline_index and high >= entry_price_high and low <= entry_ceiling:
             entered = True
-            entry_price = entry_price_high * (1 + slippage_bps / 10000)
+            entry_price = min(entry_price_high * (1 + slippage_bps / 10000), entry_ceiling)
             entry_bar_index = idx
             bars_held = 0
         if not entered:

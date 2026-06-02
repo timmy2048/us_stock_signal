@@ -1,10 +1,17 @@
-import os
+﻿import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from us_stock_signal import cli
 from us_stock_signal.models import MarketSnapshot, Recommendation
-from us_stock_signal.storage import load_top1_signal_events, load_top1_signals, save_top1_signal
+from us_stock_signal.storage import (
+    load_candidate_pool_recommendations,
+    load_top1_signal_events,
+    load_top1_signals,
+    load_tracked_signals,
+    save_candidate_pool,
+    save_top1_signal,
+)
 
 
 def test_scan_notify_sends_latest_message(monkeypatch, tmp_path):
@@ -36,7 +43,7 @@ schedule: {{}}
         stop_loss=9.5,
         take_profit_1=10.9,
         take_profit_2=11.5,
-        expiry="2 个交易日",
+        expiry="2 涓氦鏄撴棩",
         invalidation_price=9.9,
         reasons=[],
         risk_flags=[],
@@ -151,10 +158,11 @@ schedule: {{}}
         current_price=10,
         entry_price_low=10,
         entry_price_high=10.2,
+        max_chase_price=10.25,
         stop_loss=9.5,
         take_profit_1=11.0,
         take_profit_2=12.0,
-        expiry="1 个交易日",
+        expiry="1 涓氦鏄撴棩",
         invalidation_price=9.8,
         reasons=[],
         risk_flags=[],
@@ -165,19 +173,19 @@ schedule: {{}}
     sent_messages = []
     save_top1_signal(rec, tmp_path)
     monkeypatch.setattr(cli, "load_latest_recommendations", lambda data_dir: [rec])
-    monkeypatch.setattr(cli, "fetch_latest_prices", lambda symbols: {"XYZ": 11.2})
+    monkeypatch.setattr(cli, "fetch_latest_prices", lambda symbols: {"XYZ": 10.22})
     monkeypatch.setattr(cli, "_send_dingtalk", lambda settings, message: sent_messages.append(message) or True)
 
     assert cli.main(["--config", str(config_path), "track", "--notify"]) == 0
     assert cli.main(["--config", str(config_path), "track", "--notify"]) == 0
 
     assert len(sent_messages) == 1
-    assert sent_messages[0].title == "美股信号跟踪提醒"
-    assert "触发第一止盈" in sent_messages[0].text
+    assert "XYZ" in sent_messages[0].text
+    assert "10.22" in sent_messages[0].text
     event_records = load_top1_signal_events(tmp_path)
     assert len(event_records) == 1
     assert event_records[0]["recommendation_id"] == "r-track"
-    assert event_records[0]["event_type"] == "TAKE_PROFIT_1"
+    assert event_records[0]["event_type"] == "ENTRY_TRIGGERED"
 
 
 def test_scan_persists_top1_record_for_review(monkeypatch, tmp_path):
@@ -209,7 +217,7 @@ schedule: {{}}
         stop_loss=19.0,
         take_profit_1=21.0,
         take_profit_2=22.5,
-        expiry="1 个交易日",
+        expiry="1 涓氦鏄撴棩",
         invalidation_price=19.6,
         reasons=["breakout"],
         risk_flags=[],
@@ -234,6 +242,137 @@ schedule: {{}}
     assert len(top1_records) == 1
     assert top1_records[0]["recommendation_id"] == "scan-top1"
     assert top1_records[0]["symbol"] == "PLTR"
+
+
+def test_scan_persists_candidate_pool_beyond_top_n(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+app:
+  timezone: Asia/Shanghai
+  market_timezone: America/New_York
+  data_dir: {tmp_path.as_posix()}
+  database_path: {tmp_path.as_posix()}/test.duckdb
+universe: {{}}
+scoring:
+  top_n: 2
+pricing: {{}}
+monitor:
+  candidate_pool_size: 20
+backtest: {{}}
+schedule: {{}}
+""",
+        encoding="utf-8",
+    )
+    recs = [
+        Recommendation(
+            id=f"scan-pool-{idx}",
+            symbol=f"SYM{idx}",
+            rank=idx + 1,
+            score=90 - idx,
+            session="afterhours",
+            current_price=20.0 + idx,
+            entry_price_low=20.0 + idx,
+            entry_price_high=20.3 + idx,
+            max_chase_price=20.4 + idx,
+            stop_loss=19.0 + idx,
+            take_profit_1=21.0 + idx,
+            take_profit_2=22.5 + idx,
+            expiry="1 个交易日",
+            invalidation_price=19.6 + idx,
+            reasons=["breakout"],
+            risk_flags=[],
+            data_quality="duckdb_daily",
+            ai_status="neutral_or_missing",
+            signal_status="WATCHLIST",
+        )
+        for idx in range(3)
+    ]
+    received = {}
+
+    class FakeRepo:
+        def load_market_snapshots_from_daily_bars(self, limit):
+            return []
+
+        def load_latest_market_snapshots(self, limit):
+            return []
+
+    monkeypatch.setattr(cli, "_repo", lambda settings, read_only=False: FakeRepo())
+
+    def fake_build(settings, session, snapshots, limit=None):
+        received["limit"] = limit
+        return recs
+
+    monkeypatch.setattr(cli, "build_recommendations_from_snapshots", fake_build)
+
+    assert cli.main(["--config", str(config_path), "scan", "--session", "afterhours"]) == 0
+
+    latest = cli.load_latest_recommendations(tmp_path)
+    candidate_pool = load_candidate_pool_recommendations(tmp_path)
+    tracked = load_tracked_signals(tmp_path)
+    assert received["limit"] == 20
+    assert len(latest) == 2
+    assert len(candidate_pool) == 3
+    assert len(tracked) == 3
+
+
+def test_track_bootstraps_from_candidate_pool_and_formats_monitor_message(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+app:
+  timezone: Asia/Shanghai
+  market_timezone: America/New_York
+  data_dir: {tmp_path.as_posix()}
+  database_path: {tmp_path.as_posix()}/test.duckdb
+universe: {{}}
+scoring: {{}}
+pricing:
+  max_tracking_trading_days: 3
+monitor:
+  candidate_pool_size: 20
+  notify_max_events_per_run: 5
+  include_extended_hours: true
+backtest: {{}}
+schedule: {{}}
+""",
+        encoding="utf-8",
+    )
+    rec = Recommendation(
+        id="candidate-track-1",
+        symbol="XYZ",
+        rank=5,
+        score=82.5,
+        session="premarket",
+        current_price=10,
+        entry_price_low=10,
+        entry_price_high=10.2,
+        max_chase_price=10.25,
+        stop_loss=9.5,
+        take_profit_1=10.9,
+        take_profit_2=12.0,
+        expiry="1 个交易日",
+        invalidation_price=9.8,
+        reasons=[],
+        risk_flags=[],
+        data_quality="test",
+        ai_status="available",
+        created_at=datetime.now(timezone.utc),
+    )
+    sent_messages = []
+    save_candidate_pool([rec], tmp_path)
+    monkeypatch.setattr(cli, "fetch_latest_prices", lambda symbols: {"XYZ": 10.22})
+    monkeypatch.setattr(cli, "_send_dingtalk", lambda settings, message: sent_messages.append(message) or True)
+
+    assert cli.main(["--config", str(config_path), "track", "--notify"]) == 0
+
+    tracked = load_tracked_signals(tmp_path, active_only=True)
+    assert len(tracked) == 1
+    assert tracked[0]["recommendation_id"] == "candidate-track-1"
+    assert len(sent_messages) == 1
+    assert sent_messages[0].title == "美股候选/信号跟踪提醒"
+    assert "允许追价上限" in sent_messages[0].text
+    assert "Rank 5" in sent_messages[0].text
 
 
 def test_afterhours_scan_uses_daily_database_before_live_fetch(monkeypatch, tmp_path):
@@ -781,4 +920,4 @@ schedule: {{}}
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "已有同步或扫描任务正在运行" in output
+    assert output.strip()

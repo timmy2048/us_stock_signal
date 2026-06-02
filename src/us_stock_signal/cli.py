@@ -8,25 +8,34 @@ from typing import Any
 from .config import load_settings
 from .data_providers.market_data import fetch_latest_prices
 from .data_providers.yahoo_chart import fetch_yahoo_chart_daily_bars
-from .models import MarkdownMessage, SignalEvent
+from .execution_policy import (
+    config_primary_take_profit,
+    recommendation_primary_take_profit_label,
+    recommendation_primary_take_profit_price,
+)
+from .models import MarkdownMessage, Recommendation, SignalEvent
 from .notifiers.dingtalk import DingTalkNotifier, format_markdown_message
-from .pipeline import run_scan
 from .pipeline import build_recommendations_from_snapshots, collect_snapshots
 from .repository import MarketRepository
 from .runtime_lock import runtime_lock
 from .scoring_validation import validate_scoring_from_daily_bars
 from .strategy_search import search_high_yield_strategies_from_daily_bars
 from .storage import (
+    load_candidate_pool_recommendations,
     load_latest_recommendations,
     load_latest_scan_meta,
     load_latest_scan_session,
     load_signal_events,
+    load_tracked_signals,
     save_backtest_report,
+    save_candidate_pool,
     save_latest_recommendations,
     save_signal_events,
     save_strategy_search_report,
+    save_tracked_signals,
     save_top1_signal,
     save_top1_signal_events,
+    update_tracked_signal_summaries,
 )
 from .sync_guard import daily_sync_window_decision
 from .time_utils import infer_us_session, validate_session
@@ -142,33 +151,51 @@ def main(argv: list[str] | None = None) -> int:
         print("\n钉钉发送成功" if sent else "\n钉钉未发送：未配置 webhook 或请求失败")
         return 0
     if args.command == "track":
-        recommendations = load_latest_recommendations(settings.app.data_dir)
-        prices = fetch_latest_prices([rec.symbol for rec in recommendations])
+        if not _monitor_include_extended_hours(settings) and infer_us_session() != "regular":
+            print("当前仅在常规交易时段运行候选/信号跟踪。")
+            return 0
+        tracked_records = _load_active_tracked_signal_records(settings)
+        recommendations = [_tracked_signal_recommendation(record) for record in tracked_records]
+        prices = fetch_latest_prices(sorted({rec.symbol for rec in recommendations}))
         previous_events = load_signal_events(settings.app.data_dir)
         previously_notified = _previously_notified_track_events(previous_events)
+        previously_recorded = {(event.recommendation_id, event.event_type) for event in previous_events}
         events = []
         now = datetime.now(timezone.utc)
-        for rec in recommendations:
+        for rec, record in zip(recommendations, tracked_records):
             if rec.symbol not in prices:
                 continue
-            events.append(
-                evaluate_tracked_signal(
-                    rec,
-                    prices[rec.symbol],
-                    now,
-                    rec.created_at,
-                    max_tracking_days=_configured_max_holding_days(settings, None),
-                )
+            event = evaluate_tracked_signal(
+                rec,
+                prices[rec.symbol],
+                now,
+                rec.created_at,
+                max_tracking_days=_configured_max_holding_days(settings, None),
+                lifecycle_status=str(record.get("lifecycle_status") or "PENDING_ENTRY"),
             )
-        save_signal_events(events, settings.app.data_dir)
-        save_top1_signal_events(events, settings.app.data_dir)
-        for event in events:
+            if event is not None:
+                events.append(event)
+        significant_events = [
+            event
+            for event in events
+            if event.event_type in _TRACK_NOTIFY_EVENT_TYPES
+            and (event.recommendation_id, event.event_type) not in previously_recorded
+        ]
+        save_signal_events(significant_events, settings.app.data_dir)
+        update_tracked_signal_summaries(significant_events, settings.app.data_dir)
+        save_top1_signal_events(significant_events, settings.app.data_dir)
+        for event in significant_events:
             print(f"{event.symbol} {event.event_type}: {event.message} 当前价 {event.price:.2f}")
-        if not events:
+        if not significant_events:
             print("没有可跟踪事件。")
-        notify_events = [event for event in events if _should_notify_track_event(event, previously_notified)]
+        notify_events = [
+            event
+            for event in _sort_track_notify_events(significant_events)
+            if _should_notify_track_event(event, previously_notified)
+        ][:_monitor_notify_max_events_per_run(settings)]
         if args.notify and notify_events:
-            sent = _send_dingtalk(settings, _format_track_events_message(notify_events))
+            tracked_by_id = {record["recommendation_id"]: record for record in tracked_records if record.get("recommendation_id")}
+            sent = _send_dingtalk(settings, _format_track_events_message(notify_events, tracked_by_id))
             print("钉钉跟踪提醒发送成功" if sent else "钉钉跟踪提醒未发送")
         return 0
     if args.command in {"backtest", "validate-scoring"}:
@@ -214,15 +241,24 @@ def _run_scan_from_repository_unlocked(
     if not snapshots:
         snapshots = repo.load_market_snapshots_from_daily_bars(limit=scan_limit)
 
-    recommendations = build_recommendations_from_snapshots(settings, session, snapshots)
+    candidate_pool_size = _monitor_candidate_pool_size(settings)
+    recommendation_limit = max(candidate_pool_size, _configured_top_n(settings))
+    candidate_pool = _build_recommendations_from_snapshots_compat(
+        settings,
+        session,
+        snapshots,
+        limit=recommendation_limit,
+    )
+    recommendations = candidate_pool[: _configured_top_n(settings)]
     scanned_count = len(snapshots) if scan_limit is None else int(scan_limit)
     scan_summary = {
         "scanned_count": scanned_count,
-        "candidate_count": len(recommendations),
+        "candidate_count": len(candidate_pool),
         "min_score": _score_gate_for_session(settings, session),
-        "top_n": int(settings.scoring.get("top_n", 10)),
+        "top_n": _configured_top_n(settings),
+        "candidate_pool_size": candidate_pool_size,
         "trigger_mode": settings.scoring.get("trigger_mode", "standard"),
-        "primary_take_profit": settings.scoring.get("high_yield", {}).get("primary_take_profit", "tp1"),
+        "primary_take_profit": config_primary_take_profit({"scoring": settings.scoring}),
     }
     path = save_latest_recommendations(
         recommendations,
@@ -232,6 +268,18 @@ def _run_scan_from_repository_unlocked(
     )
     save_top1_signal(
         recommendations[0] if recommendations else None,
+        settings.app.data_dir,
+        session=session,
+        scan_summary=scan_summary,
+    )
+    save_candidate_pool(
+        candidate_pool,
+        settings.app.data_dir,
+        session=session,
+        scan_summary=scan_summary,
+    )
+    save_tracked_signals(
+        candidate_pool,
         settings.app.data_dir,
         session=session,
         scan_summary=scan_summary,
@@ -501,16 +549,36 @@ def _should_notify_track_event(event: SignalEvent, previously_notified: set[tupl
     return (event.recommendation_id, event.event_type) not in previously_notified
 
 
-def _format_track_events_message(events: list[SignalEvent]) -> MarkdownMessage:
-    title = "美股信号跟踪提醒"
+def _format_track_events_message(
+    events: list[SignalEvent],
+    tracked_by_id: dict[str, dict[str, Any]],
+) -> MarkdownMessage:
+    title = "美股候选/信号跟踪提醒"
     lines = [
         f"### {title}",
         "",
-        "以下为首次触发的跟踪事件，价格来自实时/近实时行情接口：",
+        "以下为本轮首次触发的候选/信号事件，价格来自实时或近实时行情接口：",
         "",
     ]
     for event in events:
-        lines.append(f"- {event.symbol} {_track_event_label(event.event_type)}：当前价 {event.price:.2f}；{event.message}")
+        record = tracked_by_id.get(event.recommendation_id, {})
+        recommendation = _tracked_signal_recommendation(record) if record else None
+        if recommendation is None:
+            lines.append(f"- {event.symbol} {_track_event_label(event.event_type)}：当前价 {event.price:.2f}；{event.message}")
+            continue
+        primary_label = recommendation_primary_take_profit_label(recommendation)
+        primary_price = recommendation_primary_take_profit_price(recommendation)
+        lines.extend(
+            [
+                f"- {event.symbol} | Rank {recommendation.rank} | {_track_event_label(event.event_type)}",
+                f"  - 当前价：{event.price:.2f}",
+                f"  - 回测触发价：{recommendation.entry_price_high:.2f}",
+                f"  - 允许追价上限：{recommendation.max_chase_price:.2f}",
+                f"  - 回测止损价：{recommendation.stop_loss:.2f}",
+                f"  - 回测主止盈：{primary_label} {primary_price:.2f}",
+                f"  - 事件说明：{event.message}",
+            ]
+        )
     lines.extend(["", "> 仅为研究提醒，不自动交易，不构成投资建议。"])
     return MarkdownMessage(title=title, text="\n".join(lines))
 
@@ -519,8 +587,8 @@ def _track_event_label(event_type: str) -> str:
     labels = {
         "ENTRY_TRIGGERED": "触发入场",
         "STOP_LOSS": "触发止损",
-        "TAKE_PROFIT_1": "触发第一止盈",
-        "TAKE_PROFIT_2": "触发第二止盈",
+        "TAKE_PROFIT_1": "触发第一止盈（主止盈 TP1）",
+        "TAKE_PROFIT_2": "触发第二止盈（主止盈 TP2）",
         "INVALIDATED": "信号失效",
         "EXPIRED": "跟踪超期",
     }
@@ -595,12 +663,75 @@ def _configured_max_holding_days(settings, override: int | None) -> int:
     return int(settings.pricing.get("max_tracking_trading_days", 10))
 
 
+def _configured_top_n(settings) -> int:
+    scoring = settings.scoring
+    if scoring.get("trigger_mode") == "high_yield_breakout":
+        return int(scoring.get("high_yield", {}).get("top_n", scoring.get("top_n", 10)))
+    return int(scoring.get("top_n", 10))
+
+
 def _scan_limit_for_command(max_symbols: int | None, settings, use_live_scan: bool) -> int | None:
     if max_symbols is not None:
         return max_symbols
     if use_live_scan:
         return int(settings.universe.get("max_symbols_per_scan", 300))
     return None
+
+
+def _build_recommendations_from_snapshots_compat(settings, session: str, snapshots, limit: int | None = None):
+    if limit is None:
+        return build_recommendations_from_snapshots(settings, session, snapshots)
+    try:
+        return build_recommendations_from_snapshots(settings, session, snapshots, limit=limit)
+    except TypeError:
+        return build_recommendations_from_snapshots(settings, session, snapshots)
+
+
+def _monitor_candidate_pool_size(settings) -> int:
+    return int(settings.monitor.get("candidate_pool_size", 20))
+
+
+def _monitor_notify_max_events_per_run(settings) -> int:
+    return int(settings.monitor.get("notify_max_events_per_run", 5))
+
+
+def _monitor_include_extended_hours(settings) -> bool:
+    return bool(settings.monitor.get("include_extended_hours", True))
+
+
+def _load_active_tracked_signal_records(settings) -> list[dict[str, Any]]:
+    records = load_tracked_signals(settings.app.data_dir, active_only=True)
+    if records:
+        return records
+    candidate_pool = load_candidate_pool_recommendations(settings.app.data_dir)
+    if candidate_pool:
+        save_tracked_signals(candidate_pool, settings.app.data_dir)
+        return load_tracked_signals(settings.app.data_dir, active_only=True)
+    recommendations = load_latest_recommendations(settings.app.data_dir)
+    if recommendations:
+        save_tracked_signals(recommendations, settings.app.data_dir)
+        return load_tracked_signals(settings.app.data_dir, active_only=True)
+    return []
+
+
+def _tracked_signal_recommendation(record: dict[str, Any]) -> Recommendation:
+    payload = dict(record.get("payload") or {})
+    created_at = payload.get("created_at")
+    if isinstance(created_at, str):
+        payload["created_at"] = datetime.fromisoformat(created_at)
+    return Recommendation(**payload)
+
+
+def _sort_track_notify_events(events: list[SignalEvent]) -> list[SignalEvent]:
+    severity = {
+        "STOP_LOSS": 0,
+        "TAKE_PROFIT_1": 1,
+        "TAKE_PROFIT_2": 1,
+        "INVALIDATED": 2,
+        "ENTRY_TRIGGERED": 3,
+        "EXPIRED": 4,
+    }
+    return sorted(events, key=lambda item: (severity.get(item.event_type, 99), item.symbol, item.timestamp))
 
 
 if __name__ == "__main__":
