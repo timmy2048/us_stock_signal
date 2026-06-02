@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from us_stock_signal import cli
 from us_stock_signal.models import MarketSnapshot, Recommendation
+from us_stock_signal.storage import load_top1_signal_events, load_top1_signals, save_top1_signal
 
 
 def test_scan_notify_sends_latest_message(monkeypatch, tmp_path):
@@ -162,6 +163,7 @@ schedule: {{}}
         created_at=datetime.now(timezone.utc),
     )
     sent_messages = []
+    save_top1_signal(rec, tmp_path)
     monkeypatch.setattr(cli, "load_latest_recommendations", lambda data_dir: [rec])
     monkeypatch.setattr(cli, "fetch_latest_prices", lambda symbols: {"XYZ": 11.2})
     monkeypatch.setattr(cli, "_send_dingtalk", lambda settings, message: sent_messages.append(message) or True)
@@ -172,6 +174,66 @@ schedule: {{}}
     assert len(sent_messages) == 1
     assert sent_messages[0].title == "美股信号跟踪提醒"
     assert "触发第一止盈" in sent_messages[0].text
+    event_records = load_top1_signal_events(tmp_path)
+    assert len(event_records) == 1
+    assert event_records[0]["recommendation_id"] == "r-track"
+    assert event_records[0]["event_type"] == "TAKE_PROFIT_1"
+
+
+def test_scan_persists_top1_record_for_review(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+app:
+  timezone: Asia/Shanghai
+  market_timezone: America/New_York
+  data_dir: {tmp_path.as_posix()}
+  database_path: {tmp_path.as_posix()}/test.duckdb
+universe: {{}}
+scoring: {{}}
+pricing: {{}}
+backtest: {{}}
+schedule: {{}}
+""",
+        encoding="utf-8",
+    )
+    rec = Recommendation(
+        id="scan-top1",
+        symbol="PLTR",
+        rank=1,
+        score=91.2,
+        session="afterhours",
+        current_price=20.0,
+        entry_price_low=20.0,
+        entry_price_high=20.3,
+        stop_loss=19.0,
+        take_profit_1=21.0,
+        take_profit_2=22.5,
+        expiry="1 个交易日",
+        invalidation_price=19.6,
+        reasons=["breakout"],
+        risk_flags=[],
+        data_quality="duckdb_daily",
+        ai_status="neutral_or_missing",
+        signal_status="WATCHLIST",
+    )
+
+    class FakeRepo:
+        def load_market_snapshots_from_daily_bars(self, limit):
+            return []
+
+        def load_latest_market_snapshots(self, limit):
+            return []
+
+    monkeypatch.setattr(cli, "_repo", lambda settings, read_only=False: FakeRepo())
+    monkeypatch.setattr(cli, "build_recommendations_from_snapshots", lambda settings, session, snapshots: [rec])
+
+    assert cli.main(["--config", str(config_path), "scan", "--session", "afterhours"]) == 0
+
+    top1_records = load_top1_signals(tmp_path)
+    assert len(top1_records) == 1
+    assert top1_records[0]["recommendation_id"] == "scan-top1"
+    assert top1_records[0]["symbol"] == "PLTR"
 
 
 def test_afterhours_scan_uses_daily_database_before_live_fetch(monkeypatch, tmp_path):

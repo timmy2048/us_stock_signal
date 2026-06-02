@@ -25,6 +25,8 @@ from .storage import (
     save_latest_recommendations,
     save_signal_events,
     save_strategy_search_report,
+    save_top1_signal,
+    save_top1_signal_events,
 )
 from .sync_guard import daily_sync_window_decision
 from .time_utils import infer_us_session, validate_session
@@ -159,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         save_signal_events(events, settings.app.data_dir)
+        save_top1_signal_events(events, settings.app.data_dir)
         for event in events:
             print(f"{event.symbol} {event.event_type}: {event.message} 当前价 {event.price:.2f}")
         if not events:
@@ -223,6 +226,12 @@ def _run_scan_from_repository_unlocked(
     }
     path = save_latest_recommendations(
         recommendations,
+        settings.app.data_dir,
+        session=session,
+        scan_summary=scan_summary,
+    )
+    save_top1_signal(
+        recommendations[0] if recommendations else None,
         settings.app.data_dir,
         session=session,
         scan_summary=scan_summary,

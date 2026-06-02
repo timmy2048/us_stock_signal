@@ -273,7 +273,16 @@ class MarketRepository:
         return snapshots
 
     def count_rows(self, table_name: str) -> int:
-        allowed = {"symbols", "daily_bars", "market_snapshots", "recommendations", "signal_events", "sync_runs"}
+        allowed = {
+            "symbols",
+            "daily_bars",
+            "market_snapshots",
+            "recommendations",
+            "signal_events",
+            "sync_runs",
+            "top1_signals",
+            "top1_signal_events",
+        }
         if table_name not in allowed:
             raise ValueError(f"unsupported table: {table_name}")
         with self._connect() as conn:
@@ -418,6 +427,36 @@ class MarketRepository:
                     message varchar,
                     started_at timestamp,
                     finished_at timestamp
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists top1_signals (
+                    recommendation_id varchar primary key,
+                    symbol varchar,
+                    session varchar,
+                    rank integer,
+                    score double,
+                    signal_status varchar,
+                    created_at timestamp,
+                    recorded_at timestamp,
+                    scan_summary_json varchar,
+                    payload json
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists top1_signal_events (
+                    event_key varchar primary key,
+                    recommendation_id varchar,
+                    symbol varchar,
+                    event_type varchar,
+                    price double,
+                    event_timestamp timestamp,
+                    message varchar,
+                    payload json
                 )
                 """
             )
