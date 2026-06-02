@@ -1,0 +1,63 @@
+app:
+  timezone: Asia/Shanghai
+  market_timezone: America/New_York
+  data_dir: data
+  database_path: data/us_stock_signal.duckdb
+
+universe:
+  min_price: 2.0
+  min_avg_dollar_volume_20d: 10000000
+  max_symbols_per_scan: 300
+  allow_small_cap_high_volatility: true
+
+scoring:
+  rule_weight: 0.60
+  ml_weight: 0.25
+  ai_weight: 0.15
+  trigger_mode: high_yield_breakout
+  min_score: 80
+  watchlist_min_score: 80
+  top_n: 2
+  high_yield:
+    profile_name: aggressive_150_60
+    min_score: 80
+    watchlist_min_score: 80
+    top_n: 2
+    candidate_pool_limit: 100
+    min_atr_pct: 5
+    max_atr_pct: 999
+    min_distance_to_20d_high_pct: -999
+    min_momentum_20_pct: 150
+    min_momentum_5_pct: 60
+    min_volume_ratio: 2
+    max_gap_pct: 80
+    max_price: 100
+    primary_take_profit: tp2
+
+pricing:
+  atr_period: 14
+  stop_atr_multiple: 1.2
+  take_profit_1_atr_multiple: 1.8
+  take_profit_2_atr_multiple: 7.0
+  min_stop_pct: 0.02
+  max_stop_pct: 0.02
+  entry_buffer_pct: 0.0
+  max_tracking_trading_days: 3
+  pending_signal_expiry_trading_days: 1
+
+backtest:
+  lookback_days: 365
+  validation_future_days: 10
+  slippage_bps: 10
+  notional_per_trade: 10000
+  ibkr_min_commission: 1.0
+  ibkr_commission_per_share: 0.005
+
+schedule:
+  scan_interval_minutes: 15
+  no_new_entry_after: "15:30"
+  daily_sync_guard_enabled: true
+  daily_sync_after: "20:30"
+  premarket_retry_after: "08:00"
+  premarket_retry_before: "09:20"
+  daily_sync_batch_delay_seconds: 1.0

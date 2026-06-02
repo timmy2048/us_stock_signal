@@ -1,0 +1,12 @@
+services:
+  us-stock-signal:
+    build:
+      context: .
+    container_name: us-stock-signal
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs:ro
+    command: ["python", "-m", "us_stock_signal.scheduler"]
